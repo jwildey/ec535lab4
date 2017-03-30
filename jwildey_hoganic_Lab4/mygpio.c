@@ -40,8 +40,17 @@
 #define GPIO_LED2 30
 #define GPIO_LED3 31
 
+#define GPIO_BTN0_NAME "BTN0"
+#define GPIO_BTN1_NAME "BTN1"
+#define GPIO_LED0_NAME "LED0"
+#define GPIO_LED1_NAME "LED1"
+#define GPIO_LED2_NAME "LED2"
+#define GPIO_LED3_NAME "LED3"
+
 #define GPIO_HIGH 1
 #define GPIO_LOW  0
+
+#define MAX_WRT_LEN 5
 
 /************************************
  * Set Module Info
@@ -65,8 +74,6 @@ static ssize_t mygpio_write(struct file *filp,
                              loff_t *f_pos);
 static void mygpio_exit(void);
 static int mygpio_init(void);
-static irqreturn_t btn0Handler(unsigned int irq, void *dev_id, struct pt_regs *regs);
-static irqreturn_t btn1Handler(unsigned int irq, void *dev_id, struct pt_regs *regs);
 
 /************************************
  * Structure Definitions
@@ -85,6 +92,26 @@ struct file_operations mygpio_fops = {
 // Major number
 static int mygpio_major = 61;
 
+// Counter Initial Value
+static unsigned long ctrInitVal = 15;
+
+// Current Counter Value
+static unsigned long ctrVal;
+
+// Counter Period (ms)
+static int ctrPer = 1000;
+
+// Counter Direction (0 Down, 1 Up)
+enum ctrDir_t {DOWN, UP};
+static int ctrDir = DOWN;
+
+// Counter State
+enum ctrState_t {STOPPED, RUNNING};
+static int ctrState = STOPPED;
+
+// Recurring Timer
+static struct timer_list gTimer;
+
 /************************************
  * Declaration of the init and exit 
  * functions
@@ -96,41 +123,68 @@ module_exit(mygpio_exit);
 /**
  * TODO
  */
-static irqreturn_t btn0Handler(unsigned int irq, void *dev_id, struct pt_regs *regs)
+void setLEDs(void)
 {
-    printk(KERN_INFO "BTN0 Handler!!!!\n");
-    printk(KERN_INFO "GPIO_LED0: %d\n", pxa_gpio_get_value(GPIO_LED0));
-    /*if(gpio_get_value(GPIO_LED0) > 0)
-    {
-        printk(KERN_INFO "GPIO_LED0 is high, setting to low\n");
-        //gpio_set_value(GPIO_LED0, GPIO_LOW);
-    }
-    else
-    {
-        printk(KERN_INFO "GPIO_LED0 is low, setting to high\n");
-        //gpio_set_value(GPIO_LED0, GPIO_HIGH);
-    }*/
-    return IRQ_HANDLED;
+    // Variables
+    int mask = 0x01;
+    int temp = ctrVal;
+
+    // Set LED Outpus
+    pxa_gpio_set_value(GPIO_LED0, (temp & mask));
+    pxa_gpio_set_value(GPIO_LED1, ((temp >> 1) & mask));
+    pxa_gpio_set_value(GPIO_LED2, ((temp >> 2) & mask));
+    pxa_gpio_set_value(GPIO_LED3, ((temp >> 3) & mask));
 }
 
-/**
- * TODO
+/** 
+ * \brief Callback function when timer expires
+ *
+ * This is the function that is called by the timer
+ * when it expires.  It will be responsible for 
+ * incrementing/decrementing the current value
+ * and for switching the GPIO.
+ *
+ * \param data
  */
-static irqreturn_t btn1Handler(unsigned int irq, void *dev_id, struct pt_regs *regs)
+static void timerCallbackFcn(unsigned long data)
 {
-    printk(KERN_INFO "BTN1 Handler!!!!\n");
-    printk(KERN_INFO "GPIO_LED0: %d\n", pxa_gpio_get_value(GPIO_LED1));
-    /*if(gpio_get_value(GPIO_LED1) > 0)
+    int btn0 = 0;
+    int btn1 = 0;
+
+    btn0 = pxa_gpio_get_value(GPIO_BTN0);
+    btn1 = pxa_gpio_get_value(GPIO_BTN1);
+
+    // Test if running or not
+    if (btn0 > 0)
     {
-        printk(KERN_INFO "GPIO_LED1 is high, setting to low\n");
-        //gpio_set_value(GPIO_LED1, GPIO_LOW);
+        ctrState = RUNNING;
+        if (btn1 > 0)
+        {
+            ctrDir = UP;
+            ctrVal++;
+            if (ctrVal > ctrInitVal)
+            {
+                ctrVal = 1;
+            }
+        }
+        else
+        {
+            ctrDir = DOWN;
+            ctrVal--;
+            if (ctrVal < 1)
+            {
+                ctrVal = ctrInitVal;
+            }
+        }
+        setLEDs();
     }
     else
     {
-        printk(KERN_INFO "GPIO_LED1 is low, setting to high\n");
-        //gpio_set_value(GPIO_LED1, GPIO_HIGH);
-    }*/
-    return IRQ_HANDLED;
+        ctrState = STOPPED;
+    }
+
+    // Reset Timer
+    mod_timer(&gTimer, jiffies + msecs_to_jiffies(ctrPer));
 }
 
 /**
@@ -156,35 +210,33 @@ static int mygpio_init(void)
 	}
 
     // Request GPIO pins
-    gpio_request(GPIO_BTN0, "BTN0");
-    gpio_request(GPIO_BTN1, "BTN1");
-    gpio_request(GPIO_LED0, "LED0");
-    gpio_request(GPIO_LED1, "LED1");
-    gpio_request(GPIO_LED2, "LED2");
-    gpio_request(GPIO_LED3, "LED3");
+    gpio_request(GPIO_BTN0, GPIO_BTN0_NAME);
+    gpio_request(GPIO_BTN1, GPIO_BTN1_NAME);
+    gpio_request(GPIO_LED0, GPIO_LED0_NAME);
+    gpio_request(GPIO_LED1, GPIO_LED1_NAME);
+    gpio_request(GPIO_LED2, GPIO_LED2_NAME);
+    gpio_request(GPIO_LED3, GPIO_LED3_NAME);
 
     // Set GPIO pin direction
     gpio_direction_input(GPIO_BTN0);
     gpio_direction_input(GPIO_BTN1);
-    gpio_direction_output(GPIO_LED0, GPIO_DFLT_LOW);
+    gpio_direction_output(GPIO_LED0, 0);
     gpio_direction_output(GPIO_LED1, 0);
     gpio_direction_output(GPIO_LED2, 0);
     gpio_direction_output(GPIO_LED3, 0);
 
-    // Setup IRQs
-    result = request_irq(gpio_to_irq(GPIO_BTN0),                     //requested interrupt
-                         (irq_handler_t) btn0Handler,                // pointer to handler function
-                         IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, // interrupt mode flag
-                         "btn0Handler",                              // used in /proc/interrupts
-                         NULL);                 // the *dev_id shared intterupt lines, NULL is okay
+    // Setup Timer
+    setup_timer(&gTimer, timerCallbackFcn, 0);
+    mod_timer(&gTimer, jiffies + msecs_to_jiffies(ctrPer));
 
-    result = request_irq(gpio_to_irq(GPIO_BTN1),                     //requested interrupt
-                         (irq_handler_t) btn1Handler,                // pointer to handler function
-                         IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, // interrupt mode flag
-                         "btn1Handler",                              // used in /proc/interrupts
-                         NULL);                 // the *dev_id shared intterupt lines, NULL is okay
+    // Set Defaults
+    ctrDir = DOWN;
+    ctrState = STOPPED;
+    ctrVal = ctrInitVal;
 
-    printk(KERN_INFO "mygpio: module loaded.\n"); 
+    setLEDs();
+
+    printk(KERN_INFO "mygpio: module loaded.\n");
 
 	return 0;
 }
@@ -201,10 +253,6 @@ static void mygpio_exit(void)
 	// Freeing the major number
 	unregister_chrdev(mygpio_major, "mygpio");
 
-    // Free up IRQs
-    free_irq(gpio_to_irq(GPIO_BTN0), NULL);
-    free_irq(gpio_to_irq(GPIO_BTN1), NULL);
-
     // Free up GPIOs
     gpio_free(GPIO_BTN0);
     gpio_free(GPIO_BTN1);
@@ -212,6 +260,8 @@ static void mygpio_exit(void)
     gpio_free(GPIO_LED1);
     gpio_free(GPIO_LED2);
     gpio_free(GPIO_LED3);
+
+    del_timer(&gTimer);
 
 	printk(KERN_INFO "mygpio: module unloaded.\n");
 }
@@ -285,6 +335,56 @@ static ssize_t mygpio_read(struct file *filp, char *buf,
 static ssize_t mygpio_write(struct file *filp, const char *buf,
 							size_t count, loff_t *f_pos)
 {
-    //TODO
-	return 0;
+    // Variables
+    char tmp[MAX_WRT_LEN];
+    char *pInput;
+    unsigned long num;
+
+    // If more than 3 bytes written, thats too many
+    // We're only expecting 2 bytes plus EOL char
+    // Valid input:
+    // f1, f2, f3, f4, f5, f6, f7, f8
+    // v1, v2, v3, v4, v5, v6, v7, v8, v9, va, vb, vc, vd, ve, vf
+    if (count > 3)
+    {
+        return -EINVAL;
+    }
+
+    // Get string from user space
+    if (copy_from_user(tmp, buf, count))
+    {
+        return -EFAULT;
+    }
+    
+    // Parse string in base 16 (HEX) to parse a-f
+    num = simple_strtoul(&tmp[1], &pInput, 16);
+    // If 0 or less, there was an error parsing
+    if (num <= 0)
+    {
+        return -EINVAL;
+    }
+
+    if (tmp[0] == 'f')
+    {
+        // Valid frequency range 1-8
+        if (num > 0 && num < 9)
+        {
+            ctrPer = (num * 1000) / 2;
+        }
+        else
+        {
+            return -EINVAL;
+        }
+    }
+    else if (tmp[0] == 'v')
+    {
+        ctrVal = num;
+        setLEDs();
+    }
+    else
+    {
+        return -EINVAL;
+    }
+
+	return count;
 }
