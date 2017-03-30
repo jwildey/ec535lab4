@@ -30,9 +30,8 @@
 #include <asm/arch/hardware.h> /* GPIO access */
 #include <asm/arch/gpio.h>
 #include <asm/arch/pxa-regs.h>
-#include <asm/arch/irqs.h>  /* interrupts */
-#include <linux/interrupt.h>
 
+// GPIO Pin Definitions
 #define GPIO_BTN0 17
 #define GPIO_BTN1 101
 #define GPIO_LED0 28
@@ -40,6 +39,7 @@
 #define GPIO_LED2 30
 #define GPIO_LED3 31
 
+// GPIO Name Definitions
 #define GPIO_BTN0_NAME "BTN0"
 #define GPIO_BTN1_NAME "BTN1"
 #define GPIO_LED0_NAME "LED0"
@@ -47,10 +47,23 @@
 #define GPIO_LED2_NAME "LED2"
 #define GPIO_LED3_NAME "LED3"
 
+// GPIO High/Low Definitions
 #define GPIO_HIGH 1
 #define GPIO_LOW  0
 
+// Max read/write lengths
 #define MAX_WRT_LEN 5
+#define MAX_MSG_LEN 128
+
+// Frequency Definitions
+#define F1 500
+#define F2 1000
+#define F3 1500
+#define F4 2000
+#define F5 2500
+#define F6 3000
+#define F7 3500
+#define F8 4000
 
 /************************************
  * Set Module Info
@@ -112,6 +125,10 @@ static int ctrState = STOPPED;
 // Recurring Timer
 static struct timer_list gTimer;
 
+// Buffer and Length for read
+static char *msgBuffer;
+static int msgBufferLen;
+
 /************************************
  * Declaration of the init and exit 
  * functions
@@ -121,7 +138,10 @@ module_init(mygpio_init);
 module_exit(mygpio_exit);
 
 /**
- * TODO
+ * \brief Set LEDs
+ *
+ * This function will set the correct GPIO to represent
+ * the value of ctrVal to the LED GPIO outputs
  */
 void setLEDs(void)
 {
@@ -134,6 +154,76 @@ void setLEDs(void)
     pxa_gpio_set_value(GPIO_LED1, ((temp >> 1) & mask));
     pxa_gpio_set_value(GPIO_LED2, ((temp >> 2) & mask));
     pxa_gpio_set_value(GPIO_LED3, ((temp >> 3) & mask));
+}
+
+/**
+ * \brief Get seconds string
+ * 
+ * This function will create the string for the period
+ * of the timer.  This is necessary because I couldn't
+ * find how to support floating point calculations.
+ *
+ * \param *str - pointer to string
+ */
+void getSecStr(char *str)
+{
+    switch (ctrPer)
+    {
+        // 1/2 second
+        case F1:
+        {
+            strcpy(str, "0.5");
+            break;
+        }
+        // 1 Second
+        case F2:
+        {
+            strcpy(str, "1.0");
+            break;
+        }
+        // 1.5 Seconds
+        case F3:
+        {
+            strcpy(str, "1.5");
+            break;
+        }
+        // 2.0 Seconds
+        case F4:
+        {
+            strcpy(str, "2.0");
+            break;
+        }
+        // 2.5 Seconds
+        case F5:
+        {
+            strcpy(str, "2.5");
+            break;
+        }
+        // 3.0 Seconds
+        case F6:
+        {
+            strcpy(str, "3.0");
+            break;
+        }
+        // 3.5 Seconds
+        case F7:
+        {
+            strcpy(str, "3.5");
+            break;
+        }
+        // 4.0 Seconds
+        case F8:
+        {
+            strcpy(str, "4.0");
+            break;
+        }
+        // Default, should never get here
+        default:
+        {
+            strcpy(str, "1.0");
+            break;
+        }
+    }
 }
 
 /** 
@@ -154,30 +244,36 @@ static void timerCallbackFcn(unsigned long data)
     btn0 = pxa_gpio_get_value(GPIO_BTN0);
     btn1 = pxa_gpio_get_value(GPIO_BTN1);
 
-    // Test if running or not
+    // State is RUNNING
     if (btn0 > 0)
     {
         ctrState = RUNNING;
+        // Direction is UP
         if (btn1 > 0)
         {
             ctrDir = UP;
             ctrVal++;
+            // Reset if reached max value
             if (ctrVal > ctrInitVal)
             {
                 ctrVal = 1;
             }
         }
+        // Direction is DOWN
         else
         {
             ctrDir = DOWN;
             ctrVal--;
+            // Reset if reached min value
             if (ctrVal < 1)
             {
                 ctrVal = ctrInitVal;
             }
         }
+        // Set state of LEDs
         setLEDs();
     }
+    // State is STOPPED
     else
     {
         ctrState = STOPPED;
@@ -209,6 +305,14 @@ static int mygpio_init(void)
 		return result;
 	}
 
+    // Allocate space for message buffer
+    msgBuffer = kmalloc(MAX_MSG_LEN, GFP_KERNEL);
+    if (!msgBuffer)
+    {
+        printk("mygpio: cannot allocate space for message buffer\n");
+        return -ENOMEM;
+    }
+
     // Request GPIO pins
     gpio_request(GPIO_BTN0, GPIO_BTN0_NAME);
     gpio_request(GPIO_BTN1, GPIO_BTN1_NAME);
@@ -234,10 +338,10 @@ static int mygpio_init(void)
     ctrState = STOPPED;
     ctrVal = ctrInitVal;
 
+    // Set initial state of LEDs
     setLEDs();
 
     printk(KERN_INFO "mygpio: module loaded.\n");
-
 	return 0;
 }
 
@@ -253,6 +357,12 @@ static void mygpio_exit(void)
 	// Freeing the major number
 	unregister_chrdev(mygpio_major, "mygpio");
 
+    // Clear the LEDs
+    pxa_gpio_set_value(GPIO_LED0, GPIO_LOW);
+    pxa_gpio_set_value(GPIO_LED1, GPIO_LOW);
+    pxa_gpio_set_value(GPIO_LED2, GPIO_LOW);
+    pxa_gpio_set_value(GPIO_LED3, GPIO_LOW);
+
     // Free up GPIOs
     gpio_free(GPIO_BTN0);
     gpio_free(GPIO_BTN1);
@@ -261,7 +371,14 @@ static void mygpio_exit(void)
     gpio_free(GPIO_LED2);
     gpio_free(GPIO_LED3);
 
+    // Delete Timer
     del_timer(&gTimer);
+
+    // Free up buffer memory
+    if (msgBuffer)
+    {
+        kfree(msgBuffer);
+    }
 
 	printk(KERN_INFO "mygpio: module unloaded.\n");
 }
@@ -315,8 +432,60 @@ static int mygpio_release(struct inode *inode, struct file *filp)
 static ssize_t mygpio_read(struct file *filp, char *buf,
                             size_t count, loff_t *f_pos)
 {
-    //TODO
-    return 0;
+    // Variables
+    char tmpStr[MAX_MSG_LEN];
+    char *secStr = "";
+
+    // Clear the buffer
+    memset(msgBuffer, 0, MAX_MSG_LEN);
+
+    //==============
+    // Create string
+    //==============
+    // Counter Value
+    sprintf(msgBuffer, "Counter Value:     %lu\n", ctrVal);
+    // Counter Period
+    getSecStr(secStr);
+    sprintf(tmpStr, "Counter Period:    %s sec\n", secStr);
+    strcat(msgBuffer, tmpStr);
+    // Counter Direction
+    if (ctrDir == UP)
+    {
+        sprintf(tmpStr, "Counter Direction: %s\n", "Up");
+    }
+    else
+    {
+        sprintf(tmpStr, "Counter Direction: %s\n", "Down");
+    }
+    strcat(msgBuffer, tmpStr);
+    // Counter State
+    if (ctrState == RUNNING)
+    {
+        sprintf(tmpStr, "Counter State:     %s\n", "Running");
+    }
+    else
+    {
+        sprintf(tmpStr, "Counter State:     %s\n", "Stopped");
+    }
+    strcat(msgBuffer, tmpStr);
+    // Message buffer length
+    msgBufferLen = strlen(msgBuffer);
+    
+    // End of buffer reached
+    if (*f_pos >= msgBufferLen)
+    {
+        return 0;
+    }
+
+    // Copy to user space
+    if (copy_to_user(buf, msgBuffer, msgBufferLen))
+    {
+        printk(KERN_ALERT "Fault in copying to user space\n");
+        return -EFAULT;
+    }
+
+    *f_pos += msgBufferLen;
+    return msgBufferLen;
 }
 
 
